@@ -26,6 +26,7 @@ from openai.types.chat.chat_completion_message import (
 )
 from openai.types.chat.chat_completion_message_tool_call import Function
 from openai.types.responses import Response
+from openai.types.responses.response_output_text import Logprob, LogprobTopLogprob
 
 from ... import _debug
 from ...agent_output import AgentOutputSchemaBase
@@ -51,6 +52,7 @@ class InternalChatCompletionMessage(ChatCompletionMessage):
     """
 
     reasoning_content: str
+    logprobs: list[Logprob] | None
 
 
 class LitellmModel(Model):
@@ -149,7 +151,9 @@ class LitellmModel(Model):
             }
 
             items = Converter.message_to_output_items(
-                LitellmConverter.convert_message_to_openai(response.choices[0].message)
+                LitellmConverter.convert_message_to_openai(
+                    response.choices[0].message, response.choices[0].logprobs
+                )
             )
 
             return ModelResponse(
@@ -356,7 +360,9 @@ class LitellmModel(Model):
 class LitellmConverter:
     @classmethod
     def convert_message_to_openai(
-        cls, message: litellm.types.utils.Message
+        cls,
+        message: litellm.types.utils.Message,
+        logprobs: litellm.types.utils.ChoiceLogprobs | None = None,
     ) -> ChatCompletionMessage:
         if message.role != "assistant":
             raise ModelBehaviorError(f"Unsupported role: {message.role}")
@@ -384,7 +390,29 @@ class LitellmConverter:
             audio=message.get("audio", None),  # litellm deletes audio if not present
             tool_calls=tool_calls,
             reasoning_content=reasoning_content,
+            logprobs=cls.convert_logprobs_to_openai(logprobs) if logprobs else None,
         )
+
+    @classmethod
+    def convert_logprobs_to_openai(
+        cls, logprobs: litellm.types.utils.ChoiceLogprobs
+    ) -> list[Logprob]:
+        return [
+            Logprob(
+                token=logprob.token,
+                logprob=logprob.logprob,
+                bytes=cast(list[int], logprob.bytes),
+                top_logprobs=[
+                    LogprobTopLogprob(
+                        token=top_logprob.token,
+                        logprob=top_logprob.logprob,
+                        bytes=cast(list[int], top_logprob.bytes),
+                    )
+                    for top_logprob in logprob.top_logprobs
+                ],
+            )
+            for logprob in logprobs.content or []
+        ]
 
     @classmethod
     def convert_annotations_to_openai(
