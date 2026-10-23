@@ -26,10 +26,10 @@ _MAX_SCHEMA_NODES = 100_000
 _MAX_SCHEMA_DEPTH = 100
 
 _ADDITIONAL_PROPERTIES_ERROR = (
-    "additionalProperties should not be set for object types. This could be because "
-    "you're using an older version of Pydantic, or because you configured additional "
-    "properties to be allowed. If you really need this, update the function or output tool "
-    "to not use a strict schema."
+    "additionalProperties must be false or a typed schema on an object with a declared type "
+    "or properties. Unrestricted additional properties are not supported in strict mode. "
+    "If you need unrestricted values, configure the function or output tool "
+    "to use a non-strict schema."
 )
 
 _OPEN_OBJECT_ERROR = (
@@ -168,8 +168,8 @@ def _ensure_strict_json_schema(
     if not is_dict(json_schema):
         raise TypeError(f"Expected {json_schema} to be a dictionary; path={path}")
 
-    # Remember author-supplied closure before strict normalization adds its own.
-    explicitly_closed = json_schema.get("additionalProperties") is False
+    # Preserve author-supplied value constraints when a singleton allOf is merged below.
+    explicit_additional_properties = "additionalProperties" in json_schema
 
     # Bound the total number of nodes we expand so a malicious `$ref` fan-out cannot expand
     # exponentially and exhaust CPU and memory.
@@ -246,7 +246,26 @@ def _ensure_strict_json_schema(
         # falsy in Python, so a truthiness check would silently leave a non-strict schema in place.
         and json_schema["additionalProperties"] is not False
     ):
-        raise UserError(_ADDITIONAL_PROPERTIES_ERROR)
+        additional_properties = json_schema["additionalProperties"]
+        if budget.reject_open_objects:
+            raise UserError(_OPEN_OBJECT_ERROR)
+        if not is_dict(additional_properties) or not additional_properties:
+            raise UserError(_ADDITIONAL_PROPERTIES_ERROR)
+        additional_properties = _ensure_strict_json_schema(
+            additional_properties,
+            path=(*path, "additionalProperties"),
+            root=root,
+            budget=budget,
+            depth=next_depth,
+            inside_nested_resource=inside_nested_resource,
+        )
+        if not any(key in additional_properties for key in ("type", "$ref", "anyOf")):
+            raise UserError(_ADDITIONAL_PROPERTIES_ERROR)
+        json_schema["additionalProperties"] = additional_properties
+        # Typed maps are accepted by the API with an explicit properties map, including
+        # when it is empty. This acceptance is not documented in the strict-schema guide.
+        if "properties" not in json_schema:
+            properties = json_schema["properties"] = {}
 
     # object types
     # { 'type': 'object', 'properties': { 'a':  {...} } }
@@ -341,7 +360,7 @@ def _ensure_strict_json_schema(
                     inside_nested_resource=inside_nested_resource,
                 )
             json_schema.pop("allOf")
-            if not explicitly_closed:
+            if not explicit_additional_properties:
                 # Close the final merged object below, after any remaining allOf is expanded.
                 json_schema.pop("additionalProperties", None)
             merged = _merge_single_all_of(entry=strict_entry, parent=json_schema)
@@ -477,7 +496,7 @@ def _merge_single_all_of(
     merged = dict(entry)
     incompatible_overlaps: list[str] = []
     if (
-        parent.get("additionalProperties") is False
+        parent.get("additionalProperties", True) is not True
         and ("properties" not in parent or parent["properties"] == {})
         and is_dict(entry.get("properties"))
         and entry["properties"] != {}

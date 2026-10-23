@@ -2450,6 +2450,22 @@ def test_to_function_tool_free_form_object_arg_falls_back_to_non_strict(free_for
     assert function_tool.params_json_schema == schema
 
 
+@pytest.mark.parametrize("properties", [{}, {"fixed": {"type": "string"}}])
+def test_to_function_tool_typed_map_preserves_non_strict_fallback(properties):
+    schema = {
+        "type": "object",
+        "properties": properties,
+        "additionalProperties": {"type": "integer"},
+    }
+    tool = MCPTool(name="typed_map", inputSchema=copy.deepcopy(schema))
+
+    function_tool = MCPUtil.to_function_tool(tool, FakeMCPServer(), convert_schemas_to_strict=True)
+
+    assert function_tool.strict_json_schema is False
+    assert function_tool.params_json_schema == schema
+    assert tool_input_schema(tool) == schema
+
+
 @pytest.mark.parametrize(
     "schema",
     [
