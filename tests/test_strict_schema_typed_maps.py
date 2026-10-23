@@ -1,6 +1,6 @@
 import copy
 import json
-from typing import Annotated, Any
+from typing import Any, Literal
 
 import httpx2
 import pytest
@@ -17,18 +17,13 @@ from tests.test_responses import get_function_tool_call, get_text_message
 
 AnyJsonValue = TypeAliasType(
     "AnyJsonValue",
-    str
-    | int
-    | Annotated[float, Field(allow_inf_nan=False)]
-    | bool
-    | list["AnyJsonValue"]
-    | dict[str, "AnyJsonValue"]
-    | None,
+    str | int | float | bool | list["AnyJsonValue"] | dict[str, "AnyJsonValue"] | None,
 )
 
 
-class JsonOutput(BaseModel):
-    value: AnyJsonValue
+class Result(BaseModel):
+    status: Literal["success", "failure"]
+    metadata: AnyJsonValue
 
 
 # An independent wire-schema oracle, not recomputed by the normalizer under test.
@@ -52,26 +47,30 @@ _JSON_SCHEMA = {
         }
     },
     "type": "object",
-    "title": "JsonOutput",
-    "properties": {"value": {"$ref": "#/$defs/AnyJsonValue"}},
-    "required": ["value"],
+    "title": "Result",
+    "properties": {
+        "status": {"title": "Status", "type": "string", "enum": ["success", "failure"]},
+        "metadata": {"$ref": "#/$defs/AnyJsonValue"},
+    },
+    "required": ["status", "metadata"],
     "additionalProperties": False,
 }
 _VALUE = {"nested": [{"count": 3, "optional": None}, 2.5, True, ["x"]]}
+_RESULT = {"status": "success", "metadata": _VALUE}
 
 
-def test_recursive_json_output_schema_is_exact_and_idempotent():
-    output = AgentOutputSchema(JsonOutput, strict_json_schema=True)
+def test_recursive_json_output_preserves_strict_outer_schema_and_is_idempotent():
+    output = AgentOutputSchema(Result, strict_json_schema=True)
 
     assert output.is_strict_json_schema()
     assert output.json_schema() == _JSON_SCHEMA
     assert ensure_strict_json_schema(copy.deepcopy(output.json_schema())) == _JSON_SCHEMA
-    assert output.validate_json(json.dumps({"value": _VALUE})) == JsonOutput(value=_VALUE)
+    assert output.validate_json(json.dumps(_RESULT)) == Result(status="success", metadata=_VALUE)
 
 
 def test_recursive_json_field_description_expands_reference():
-    class DescribedOutput(BaseModel):
-        value: AnyJsonValue = Field(description="Any JSON value.")
+    class DescribedOutput(Result):
+        metadata: AnyJsonValue = Field(description="Any JSON value.")
 
     output = AgentOutputSchema(DescribedOutput)
 
@@ -79,10 +78,11 @@ def test_recursive_json_field_description_expands_reference():
         **_JSON_SCHEMA,
         "title": "DescribedOutput",
         "properties": {
-            "value": {
+            **_JSON_SCHEMA["properties"],
+            "metadata": {
                 **_JSON_SCHEMA["$defs"]["AnyJsonValue"],
                 "description": "Any JSON value.",
-            }
+            },
         },
     }
 
@@ -94,8 +94,8 @@ async def test_recursive_json_through_runner_and_responses(mode):
     received: list[Any] = []
 
     @function_tool
-    def store_value(value: AnyJsonValue) -> str:
-        received.append(value)
+    def store_value(status: Literal["success", "failure"], metadata: AnyJsonValue) -> str:
+        received.append({"status": status, "metadata": metadata})
         return "stored"
 
     # The provider request body is part of the regression, so use an HTTP mock rather
@@ -105,14 +105,14 @@ async def test_recursive_json_through_runner_and_responses(mode):
         if mode == "output":
             assert body["text"]["format"]["strict"] is True
             assert body["text"]["format"]["schema"] == _JSON_SCHEMA
-            item = get_text_message(json.dumps({"value": _VALUE}))
+            item = get_text_message(json.dumps(_RESULT))
         else:
             assert body["tools"][0]["strict"] is True
             assert body["tools"][0]["parameters"] == {
                 **_JSON_SCHEMA,
                 "title": "store_value_args",
             }
-            item = get_function_tool_call("store_value", json.dumps({"value": _VALUE}))
+            item = get_function_tool_call("store_value", json.dumps(_RESULT))
         return httpx2.Response(200, json=get_response_obj([item]).model_dump())
 
     async with AsyncOpenAI(
@@ -122,7 +122,7 @@ async def test_recursive_json_through_runner_and_responses(mode):
         agent = Agent(
             name="typed-json",
             model=OpenAIResponsesModel(model="test-model", openai_client=client),
-            output_type=AgentOutputSchema(JsonOutput, strict_json_schema=True)
+            output_type=AgentOutputSchema(Result, strict_json_schema=True)
             if mode == "output"
             else None,
             tools=[store_value] if mode == "tool" else [],
@@ -133,11 +133,11 @@ async def test_recursive_json_through_runner_and_responses(mode):
         )
 
     if mode == "output":
-        assert result.final_output == JsonOutput(value=_VALUE)
+        assert result.final_output == Result(status="success", metadata=_VALUE)
         assert received == []
     else:
         assert result.final_output == "stored"
-        assert received == [_VALUE]
+        assert received == [_RESULT]
 
 
 def test_pydantic_integer_map_gets_explicit_empty_properties():
