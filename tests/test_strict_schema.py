@@ -268,14 +268,18 @@ def test_object_with_empty_dict_additional_properties():
 
 
 def test_object_with_schema_additional_properties():
-    # A non-empty additionalProperties schema is also non-strict and must be rejected.
+    # Fixed properties and typed extra values retain their separate constraints.
     schema = {
         "type": "object",
         "properties": {"a": {"type": "string"}},
         "additionalProperties": {"type": "string"},
     }
-    with pytest.raises(UserError):
-        ensure_strict_json_schema(schema)
+    assert ensure_strict_json_schema(schema) == {
+        "type": "object",
+        "properties": {"a": {"type": "string"}},
+        "required": ["a"],
+        "additionalProperties": {"type": "string"},
+    }
 
 
 def test_object_with_false_additional_properties_is_allowed():

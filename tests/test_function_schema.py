@@ -638,14 +638,23 @@ def test_variadic_field_constraints_do_not_bypass_fixed_tuple_rejection():
         function_schema(func)
 
 
-def test_schema_with_mapping_raises_strict_mode_error():
-    """A mapping type is not allowed in strict mode. Same for dicts. Ensure we raise a UserError."""
+def test_schema_with_typed_mapping_is_strict_and_invocable():
+    def func_with_mapping(test_one: Mapping[str, int]) -> int:
+        return sum(test_one.values())
 
-    def func_with_mapping(test_one: Mapping[str, int]) -> str:
-        return "foo"
+    schema = function_schema(func_with_mapping)
 
-    with pytest.raises(UserError):
-        function_schema(func_with_mapping)
+    assert schema.strict_json_schema
+    assert schema.params_json_schema["properties"]["test_one"] == {
+        "title": "Test One",
+        "type": "object",
+        "additionalProperties": {"type": "integer"},
+        "properties": {},
+        "required": [],
+    }
+    parsed = schema.params_pydantic_model.model_validate({"test_one": {"first": 1, "second": 2}})
+    args, kwargs = schema.to_call_args(parsed)
+    assert func_with_mapping(*args, **kwargs) == 3
 
 
 def test_name_override_without_docstring() -> None:
